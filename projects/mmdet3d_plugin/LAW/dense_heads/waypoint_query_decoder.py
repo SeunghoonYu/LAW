@@ -26,12 +26,12 @@ from projects.mmdet3d_plugin.LAW.dense_heads.utils import get_locations
 from projects.mmdet3d_plugin.LAW.utils.visualization import prj_ego_traj_to_2d
 # from thop import profile
 
-@HEADS.register_module()
+@HEADS.register_module()    # MMDetection3D에 헤드로 등록
 class WaypointHead(BaseModule):
     def __init__(self,
-                num_proposals=6,
+                num_proposals=6,            # 예측할 waypoint 수
                 #MHA
-                hidden_channel=256,
+                hidden_channel=256,         # Transformer에서 사용하는 채널 크기
                 dim_feedforward=1024,
                 num_heads=8,
                 dropout=0.0,
@@ -46,10 +46,10 @@ class WaypointHead(BaseModule):
                 #others
                 train_cfg=None,
                 test_cfg=None,
-                use_wm=True,
+                use_wm=True,                # Use World Model
                 num_spatial_token=36,
                 num_tf_layers=2,
-                num_traj_modal=1,
+                num_traj_modal=1,           # 예측할 Trajectory 수
                 **kwargs,
                 ):
         """
@@ -61,8 +61,8 @@ class WaypointHead(BaseModule):
         # query feature
         self.num_views = num_views
         self.num_proposals = num_proposals
-        self.view_query_feat = nn.Parameter(torch.randn(1, self.num_views, hidden_channel, self.num_proposals))
-        self.waypoint_query_feat = nn.Parameter(torch.randn(1, self.num_proposals, hidden_channel))
+        self.view_query_feat = nn.Parameter(torch.randn(1, self.num_views, hidden_channel, self.num_proposals))     # 각 카메라 뷰별 쿼리 벡터 (Transformer 디코더에서 사용)
+        self.waypoint_query_feat = nn.Parameter(torch.randn(1, self.num_proposals, hidden_channel))                 # Waypoint 예측을 위한 쿼리
 
         # spatial attn
         spatial_decoder_layer = nn.TransformerDecoderLayer(
@@ -78,6 +78,7 @@ class WaypointHead(BaseModule):
             for _ in range(self.num_views)])
 
         # wp_attn
+        # waypoint 예측에 사용되는 attention 모듈
         wp_decoder_layer = nn.TransformerDecoderLayer(
                 d_model=hidden_channel,
                 nhead=num_heads,
@@ -97,8 +98,9 @@ class WaypointHead(BaseModule):
         )
         self._wm_decoder = nn.TransformerDecoder(wm_decoder_layer, num_tf_layers) 
 
+        #
         self.action_aware_encoder = nn.Sequential(
-            nn.Linear(hidden_channel + 6*2, hidden_channel),
+            nn.Linear(hidden_channel + 6*2, hidden_channel),    # 현재 view feature + 예측한 waypoint를 합쳐서 학습하는 구조
             nn.ReLU(inplace=True),
             nn.Linear(hidden_channel, hidden_channel),
             nn.ReLU(inplace=True),
@@ -106,10 +108,11 @@ class WaypointHead(BaseModule):
         )
         
         # loss
-        self.loss_plan_reg = build_loss(dict(type='L1Loss', loss_weight=1.0))
-        self.loss_plan_rec = nn.MSELoss()
+        self.loss_plan_reg = build_loss(dict(type='L1Loss', loss_weight=1.0))       # Waypoint 예측 관련 L1 Loss
+        self.loss_plan_rec = nn.MSELoss()                                           # World Model 위한 MSE Loss
 
         # head
+        # Transformer를 통해 얻은 feature를 (x,y) 형태의 waypoints로 변환
         self.num_traj_modal = num_traj_modal
         self.waypoint_head = nn.Sequential(
                 nn.Linear(hidden_channel, hidden_channel),
@@ -194,28 +197,32 @@ class WaypointHead(BaseModule):
     def forward(self, img_feat, img_metas, ego_info=None, is_test=False):
         # init
         losses = {}
-        Bz, num_views, num_channels, height, width = img_feat.shape
-        init_view_query_feat = self.view_query_feat.clone().repeat(Bz, 1, 1, 1).permute(0, 1, 3, 2)
-        init_waypoint_query_feat = self.waypoint_query_feat.clone().repeat(Bz, 1, 1)
+        Bz, num_views, num_channels, height, width = img_feat.shape         # shape:(배치, 뷰 수, 채널 수, 높이 ,너비)
+        init_view_query_feat = self.view_query_feat.clone().repeat(Bz, 1, 1, 1).permute(0, 1, 3, 2)     # batch 확장 (1, 6, 256, 6) -> (Bz, 6, 256, 6)      # 각 뷰별 proposal 별로 Transformer 쿼리를 사용하기 위한 준비
+        init_waypoint_query_feat = self.waypoint_query_feat.clone().repeat(Bz, 1, 1)    # Waypoint 예측용 쿼리도 배치 크기만큼 복제
 
         # img pos emb
+        # 이미지 위치 임베딩 추가
+        # 3D 위치 정보를 기반으로 생성한 Positional Embedding
+        # 이미지 픽셀의 (x, y, depth) 위치 정보를 바탕으로 생성
         img_pos = self.img_position_embeding(img_feat, img_metas)
         img_pos = img_pos.reshape(Bz, num_views, height, width, num_channels)
         img_pos = img_pos.permute(0, 1, 4, 2, 3)
         img_feat_emb = img_feat + img_pos   
 
         # spatial view feat
-        img_feat_emb = img_feat_emb.reshape(Bz, num_views, num_channels, height*width).permute(0, 1, 3, 2)
+        # 각 View 별로 Transformer Decoder 처리
+        img_feat_emb = img_feat_emb.reshape(Bz, num_views, num_channels, height*width).permute(0, 1, 3, 2)  
         spatial_view_feat = torch.zeros_like(init_view_query_feat)
         for i in range(self.num_views):
-            spatial_view_feat[:, i] = self._spatial_decoder[i](init_view_query_feat[:, i], img_feat_emb[:, i])
+            spatial_view_feat[:, i] = self._spatial_decoder[i](init_view_query_feat[:, i], img_feat_emb[:, i])  # 초기화된 spatial feature (결과 저장용 텐서)
 
         batch_size, num_view, num_tokens, num_channel = spatial_view_feat.shape
-        spatial_view_feat = spatial_view_feat.reshape(batch_size, -1, num_channel)
+        spatial_view_feat = spatial_view_feat.reshape(batch_size, -1, num_channel)  # 여러 뷰의 결과를 합쳐서 하나의 토큰 시퀀스로 만듬
 
         # predict wp
         updated_waypoint_query_feat = self.wp_attn(init_waypoint_query_feat, spatial_view_feat) #final_view_feat.shape torch.Size([1, 1440, 256])
-        cur_waypoint = self.waypoint_head(updated_waypoint_query_feat)
+        cur_waypoint = self.waypoint_head(updated_waypoint_query_feat)  # 최종 waypoint 예측
 
         if self.num_traj_modal > 1:
             assert self.num_traj_modal == 3
@@ -225,7 +232,7 @@ class WaypointHead(BaseModule):
             cur_waypoint = cur_waypoint[: ,: ,ego_cmd == 1].squeeze(2)
 
         # world model prediction
-        wm_next_latent = self.wm_prediction(spatial_view_feat, cur_waypoint)
+        wm_next_latent = self.wm_prediction(spatial_view_feat, cur_waypoint)    # next future latent feature 예측
 
         return cur_waypoint, spatial_view_feat, wm_next_latent
     

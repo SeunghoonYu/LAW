@@ -16,12 +16,12 @@ from mmdet3d.models import builder
 
 from projects.mmdet3d_plugin.LAW.utils import prj_pts_to_img, draw_lidar_pts, denormalize_img
 import matplotlib.pyplot as plt
-from ipdb import set_trace
+# from ipdb import set_trace
 
 @DETECTORS.register_module()
 class LAW(VAD):
     def __init__(self,
-                use_video=False,
+                use_video=False,        # 비디오 프레임 사용 여부
                 use_swin=False,
                 only_front_view=False,
                 use_multi_view=True,
@@ -214,15 +214,16 @@ class LAW(VAD):
         #get the ego info   
         losses = {}
         B = ego_his_trajs.size(0)
-        ego_his_trajs = ego_his_trajs.reshape(B, -1)
-        ego_lcf_feat = ego_lcf_feat.reshape(B, -1)
+        ego_his_trajs = ego_his_trajs.reshape(B, -1)    # 과거 궤적
+        ego_lcf_feat = ego_lcf_feat.reshape(B, -1)      # ego status
         ego_fut_cmd = ego_fut_cmd.reshape(B, -1)
-        ego_info = torch.cat([ego_his_trajs, ego_lcf_feat, ego_fut_cmd], dim=1)
+        ego_info = torch.cat([ego_his_trajs, ego_lcf_feat, ego_fut_cmd], dim=1)     # 3개 정보 concat해서 1차원 정보로 만듬
         
-        prev_pred_img_feat = pred_img_feat
-        preds_ego_future_traj, cur_img_feat, pred_img_feat = self.pts_bbox_head(img_feats, img_metas, ego_info)
+        prev_pred_img_feat = pred_img_feat      # 이전 시점에 현재 시점을 예측한 이미지 feature
+        preds_ego_future_traj, cur_img_feat, pred_img_feat = self.pts_bbox_head(img_feats, img_metas, ego_info)       # 현재 시점에서 1. 궤적 예측, 2.현재 이미지 feature, 3. 다음 시점 이미지 feature 예측  
         
-        # world model loss
+        # world model loss  
+        # supervision : Predicted Latents <-> Visual Latents from current time stamp image
         loss_rec = self.pts_bbox_head.loss_reconstruction(
                                 prev_pred_img_feat, 
                                 cur_img_feat.detach(),
